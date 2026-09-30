@@ -192,12 +192,14 @@ export const S = {
   chat: {
     emptyTitle: 'Inga meddelanden än',
     emptyBody: (u: string) => `Säg hej till ${u}.`,
-    composerPlaceholder: 'Meddelanden kommer snart',
-    composerDisabledHint: 'Chattfunktionen är inte klar än',
-    comingSoon: 'Realtidschatt kommer snart',
+    composerPlaceholder: 'Skriv ett meddelande',
     sendA11y: 'Skicka meddelande',
     cameraA11y: 'Skicka en snap',
     friendsSubtitle: 'Vänner',
+    loadFailed: 'Kunde inte hämta meddelandena',
+    sendFailed: 'Kunde inte skicka meddelandet',
+    sentA11y: (body: string) => `Du: ${body}`,
+    receivedA11y: (u: string, body: string) => `${u}: ${body}`,
   },
 
   nav: {

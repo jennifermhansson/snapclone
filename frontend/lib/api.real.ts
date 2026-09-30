@@ -16,13 +16,16 @@ import {
   type AddFriendResponse,
   type ApiFriend,
   type ApiFriendRequest,
+  type ApiMessage,
   type AuthResponse,
   type SendSnapInput,
   type Tokens,
 } from './api.types';
 
 // `localhost` is the phone, not your Mac — see .env.example.
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
+// It points at nginx, the only way into the backend — never at a single instance.
+// The mock exports this as null, which is how lib/socket.ts knows there is no server.
+export const API_BASE_URL: string | null = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost';
 
 let tokens: Tokens | null = null;
 
@@ -31,6 +34,20 @@ let refreshing: Promise<boolean> | null = null;
 
 export function setTokens(next: Tokens | null): void {
   tokens = next;
+}
+
+/** For the websocket handshake, which authenticates with the access token. */
+export function getAccessToken(): string | null {
+  return tokens?.access_token ?? null;
+}
+
+/** For the websocket: its handshake is not an HTTP call we can replay, so when it
+ *  is refused the socket asks for a fresh token pair here and reconnects. */
+export function refreshSession(): Promise<boolean> {
+  refreshing ??= refreshTokens().finally(() => {
+    refreshing = null;
+  });
+  return refreshing;
 }
 
 type RequestOptions = {
@@ -97,10 +114,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (res.status === 401 && options.auth !== false) {
     // .finally is always async, so it can't clear `refreshing` before it's assigned.
-    refreshing ??= refreshTokens().finally(() => {
-      refreshing = null;
-    });
-    if (await refreshing) res = await send(path, options);
+    if (await refreshSession()) res = await send(path, options);
   }
 
   if (!res.ok) throw await toApiError(res);
@@ -148,4 +162,19 @@ export async function sendSnap({ recipients, photo, text }: SendSnapInput): Prom
   if (text) form.append('text', text);
 
   await request('/snaps', { method: 'POST', body: form });
+}
+
+/** Newest first. `before` is the id of the oldest message you already have. */
+export async function getMessages(username: string, before?: string): Promise<ApiMessage[]> {
+  const query = before ? `?before=${encodeURIComponent(before)}` : '';
+  const body = await request<{ messages: ApiMessage[] }>(`/messages/${encodeURIComponent(username)}${query}`);
+  return body.messages;
+}
+
+export function sendMessage(recipientUsername: string, body: string): Promise<ApiMessage> {
+  return request('/messages', { method: 'POST', body: { recipient_username: recipientUsername, body } });
+}
+
+export async function savePushToken(token: string): Promise<void> {
+  await request('/push-token', { method: 'POST', body: { token } });
 }

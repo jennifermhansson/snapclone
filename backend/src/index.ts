@@ -28,6 +28,8 @@ await httpServer.register(websocket)
 
 const port = Number(process.env.PORT ?? 3000);
 
-await httpServer.listen({ port });
+// HOST is set to 0.0.0.0 in docker-compose.yml so nginx, on the same Docker
+// network, can reach the container. Unset, Fastify listens on localhost only.
+await httpServer.listen({ port, host: process.env.HOST });
 
 console.log(`Listening on http://localhost:${port}`);

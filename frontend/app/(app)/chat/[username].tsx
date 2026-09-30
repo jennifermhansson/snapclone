@@ -1,26 +1,95 @@
 import { router, useLocalSearchParams } from 'expo-router';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FlatList, KeyboardAvoidingView, Platform, StyleSheet, TextInput, View } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { AppText } from '@/components/ui/app-text';
 import { Avatar } from '@/components/ui/avatar';
 import { EmptyState } from '@/components/ui/empty-state';
+import { ErrorBanner } from '@/components/ui/error-banner';
 import { IconButton } from '@/components/ui/icon-button';
-import { Colors, Size, Spacing } from '@/constants/design';
+import { Colors, Radius, Size, Spacing } from '@/constants/design';
 import { S } from '@/constants/strings';
+import { useApi } from '@/hooks/use-api';
+import { getMessages, sendMessage, type ApiMessage } from '@/lib/api';
+import { onMessageReceived, onSocketConnect } from '@/lib/socket';
 
-/**
- * Shell only — Wednesday's WebSocket work plugs in here.
- *
- * The list is already `inverted` and the composer already sits inside a
- * KeyboardAvoidingView so that enabling messages later is wiring, not a rewrite.
- * Bubble styling is decided in `renderItem` below when messages arrive:
- *   sent     -> alignSelf 'flex-end',   fill Colors.sent,       borderBottomRightRadius 6
- *   received -> alignSelf 'flex-start', fill Colors.surfaceAlt, borderBottomLeftRadius 6
- */
+/** Newest first: the list is `inverted`, so index 0 is drawn at the bottom. */
+function mergeNewestFirst(current: ApiMessage[], incoming: ApiMessage[]): ApiMessage[] {
+  const byId = new Map(current.map((message) => [message.id, message]));
+  for (const message of incoming) byId.set(message.id, message);
+  // ids are bigserial on the backend, so a higher id is a later message.
+  return [...byId.values()].sort((a, b) => Number(b.id) - Number(a.id));
+}
+
 export default function ChatScreen() {
   const insets = useSafeAreaInsets();
   const { username } = useLocalSearchParams<{ username: string }>();
+  const call = useApi();
+
+  const [messages, setMessages] = useState<ApiMessage[]>([]);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<{ lead: string; detail: string } | null>(null);
+  const loadingOlder = useRef(false);
+  const reachedStart = useRef(false);
+
+  const loadLatest = useCallback(async () => {
+    const res = await call(() => getMessages(username));
+    if (!res.ok) return setError({ lead: S.chat.loadFailed, detail: res.message });
+    setError(null);
+    setMessages((current) => mergeNewestFirst(current, res.data));
+  }, [call, username]);
+
+  // First page, and again after every websocket (re)connect: whatever arrived
+  // while the socket was down was only ever saved, never pushed to us.
+  useEffect(() => {
+    void loadLatest();
+    return onSocketConnect(() => void loadLatest());
+  }, [loadLatest]);
+
+  // Live messages from THIS friend. The socket is shared by the whole app, so
+  // messages from anyone else are ignored here.
+  useEffect(
+    () =>
+      onMessageReceived((message) => {
+        if (message.sender_username === username) {
+          setMessages((current) => mergeNewestFirst(current, [message]));
+        }
+      }),
+    [username],
+  );
+
+  const loadOlder = useCallback(async () => {
+    const oldest = messages[messages.length - 1];
+    if (!oldest || loadingOlder.current || reachedStart.current) return;
+
+    loadingOlder.current = true;
+    const res = await call(() => getMessages(username, oldest.id));
+    loadingOlder.current = false;
+
+    if (!res.ok) return setError({ lead: S.chat.loadFailed, detail: res.message });
+    // The backend pages by 50; fewer back means there is nothing older.
+    if (res.data.length < 50) reachedStart.current = true;
+    setMessages((current) => mergeNewestFirst(current, res.data));
+  }, [call, messages, username]);
+
+  async function send() {
+    const body = draft.trim();
+    if (!body || sending) return;
+
+    setSending(true);
+    const res = await call(() => sendMessage(username, body));
+    setSending(false);
+
+    if (!res.ok) return setError({ lead: S.chat.sendFailed, detail: res.message });
+
+    setError(null);
+    setDraft('');
+    // Our own message comes back in the response; the socket only carries
+    // messages TO us, so nothing else would put it on screen.
+    setMessages((current) => mergeNewestFirst(current, [res.data]));
+  }
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
@@ -38,11 +107,28 @@ export default function ChatScreen() {
         <IconButton name="camera.fill" onPress={() => router.navigate('/')} accessibilityLabel={S.chat.cameraA11y} />
       </View>
 
+      <ErrorBanner message={error?.lead ?? null} detail={error?.detail} onDismiss={() => setError(null)} />
+
       <FlatList
         inverted
-        data={[]}
-        keyExtractor={(_, index) => String(index)}
-        renderItem={null}
+        data={messages}
+        keyExtractor={(message) => message.id}
+        renderItem={({ item }) => {
+          const mine = item.sender_username !== username;
+          return (
+            <View
+              style={[styles.bubble, mine ? styles.sent : styles.received]}
+              accessible
+              accessibilityLabel={mine ? S.chat.sentA11y(item.body) : S.chat.receivedA11y(username, item.body)}
+            >
+              <AppText variant="body" color={mine ? Colors.onDark : Colors.text}>
+                {item.body}
+              </AppText>
+            </View>
+          );
+        }}
+        onEndReached={loadOlder}
+        onEndReachedThreshold={0.5}
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={
           <EmptyState
@@ -54,35 +140,23 @@ export default function ChatScreen() {
       />
 
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <AppText variant="meta" color={Colors.textTertiary} center style={styles.comingSoon}>
-          {S.chat.comingSoon}
-        </AppText>
-
         <View style={[styles.composer, { paddingBottom: insets.bottom + Spacing.sm }]}>
-          <IconButton
-            name="camera.fill"
-            onPress={() => {}}
-            accessibilityLabel={S.chat.cameraA11y}
-            size={40}
-            disabled
-          />
           <TextInput
-            editable={false}
+            value={draft}
+            onChangeText={setDraft}
             placeholder={S.chat.composerPlaceholder}
-            placeholderTextColor={Colors.disabledText}
-            // Present in the accessibility tree, just marked unavailable — hiding a
-            // disabled control entirely is worse than explaining it.
-            accessibilityState={{ disabled: true }}
-            accessibilityHint={S.chat.composerDisabledHint}
+            placeholderTextColor={Colors.textTertiary}
+            multiline
+            maxLength={2000}
             style={styles.input}
           />
           <IconButton
             name="paperplane.fill"
-            onPress={() => {}}
+            onPress={send}
             accessibilityLabel={S.chat.sendA11y}
             size={40}
             variant="filled"
-            disabled
+            disabled={sending || draft.trim().length === 0}
           />
         </View>
       </KeyboardAvoidingView>
@@ -102,8 +176,17 @@ const styles = StyleSheet.create({
     borderBottomColor: Colors.separator,
   },
   headerText: { flex: 1 },
-  listContent: { flexGrow: 1, justifyContent: 'center', padding: Spacing.lg },
-  comingSoon: { paddingVertical: Spacing.md },
+  // flexGrow + center keeps the empty state in the middle; with messages the list
+  // simply fills up from the bottom because it is inverted.
+  listContent: { flexGrow: 1, padding: Spacing.lg, gap: Spacing.sm },
+  bubble: {
+    maxWidth: '80%',
+    borderRadius: Radius.lg,
+    paddingHorizontal: Spacing.md,
+    paddingVertical: Spacing.sm,
+  },
+  sent: { alignSelf: 'flex-end', backgroundColor: Colors.inkSoft, borderBottomRightRadius: 6 },
+  received: { alignSelf: 'flex-start', backgroundColor: Colors.surfaceAlt, borderBottomLeftRadius: 6 },
   composer: {
     flexDirection: 'row',
     alignItems: 'flex-end',

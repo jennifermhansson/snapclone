@@ -10,6 +10,7 @@ import {
   type AddFriendResponse,
   type ApiFriend,
   type ApiFriendRequest,
+  type ApiMessage,
   type AuthResponse,
   type SendSnapInput,
   type Tokens,
@@ -62,6 +63,17 @@ function authResponse(username: string): AuthResponse {
 
 export function setTokens(next: Tokens | null): void {
   tokens = next;
+}
+
+/** No server, so no websocket: lib/socket.ts does nothing when this is null. */
+export const API_BASE_URL: string | null = null;
+
+export function getAccessToken(): string | null {
+  return tokens?.access_token ?? null;
+}
+
+export async function refreshSession(): Promise<boolean> {
+  return false;
 }
 
 export async function register(username: string, password: string): Promise<AuthResponse> {
@@ -134,4 +146,42 @@ export async function sendSnap(input: SendSnapInput): Promise<void> {
 
   const notFriend = input.recipients.find((username) => !friends.get(username)?.mutual);
   if (notFriend) throw new ApiError(400, `You are not friends with ${notFriend}`);
+}
+
+/** Conversation history per friend, oldest first. Resets on reload. */
+const conversations = new Map<string, ApiMessage[]>();
+
+export async function getMessages(username: string, before?: string): Promise<ApiMessage[]> {
+  await delay();
+  requireUser();
+  if (!friends.get(username)?.mutual) throw new ApiError(400, `You are not friends with ${username}`);
+
+  const newestFirst = [...(conversations.get(username) ?? [])].reverse();
+  const older = before ? newestFirst.filter((m) => Number(m.id) < Number(before)) : newestFirst;
+  return older.slice(0, 50);
+}
+
+export async function sendMessage(recipientUsername: string, body: string): Promise<ApiMessage> {
+  await delay();
+  const me = requireUser();
+  if (!friends.get(recipientUsername)?.mutual) {
+    throw new ApiError(400, `You are not friends with ${recipientUsername}`);
+  }
+  if (body.trim().length === 0) throw new ApiError(400, 'A message cannot be empty');
+
+  const list = conversations.get(recipientUsername) ?? [];
+  const message: ApiMessage = {
+    id: String(Date.now()),
+    sender_username: me,
+    recipient_username: recipientUsername,
+    body: body.trim(),
+    created_at: new Date().toISOString(),
+  };
+  conversations.set(recipientUsername, [...list, message]);
+  return message;
+}
+
+export async function savePushToken(_token: string): Promise<void> {
+  await delay();
+  requireUser();
 }

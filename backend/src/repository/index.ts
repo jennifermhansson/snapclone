@@ -1,5 +1,5 @@
 import { sql } from 'bun'
-import type { AddFriendResult, CreateSnapInput, FriendListEntry, InboxEntry, IncomingFriendRequest, PublicUser, SnapRow, SnapWithSender, UserRow } from './types'
+import type { AddFriendResult, CreateSnapInput, FriendListEntry, InboxEntry, IncomingFriendRequest, MessageRow, PublicUser, SnapRow, SnapWithSender, UserRow } from './types'
 
 // Check if user exists
 export async function userExists(username: string): Promise<boolean> {
@@ -310,4 +310,94 @@ export async function getIncomingFriendRequests(username: string): Promise<Incom
         ORDER BY f.created_at DESC
     `
     return rows as IncomingFriendRequest[]
+}
+
+// Save a chat message. The caller has already checked that the two are friends.
+// INSERT..SELECT over the two username lookups, like addFriend: an unknown
+// username makes it a no-op, which surfaces as a null return.
+export async function insertMessage(
+    senderUsername: string,
+    recipientUsername: string,
+    body: string
+): Promise<MessageRow | null> {
+    const [row] = await sql`
+        WITH ins AS (
+            INSERT INTO messages (sender_id, recipient_id, body)
+            SELECT s.id, r.id, ${body}
+            FROM users s, users r
+            WHERE s.username = ${senderUsername}
+              AND r.username = ${recipientUsername}
+            RETURNING *
+        )
+        SELECT
+            ins.id,
+            ${senderUsername}::text    AS sender_username,
+            ${recipientUsername}::text AS recipient_username,
+            ins.body,
+            ins.created_at
+        FROM ins
+    `
+    return (row as MessageRow | undefined) ?? null
+}
+
+// The conversation between two users, newest first, in pages. `before` is the
+// id of the oldest message the client already has; omit it for the first page.
+// Served by messages_conversation_idx — the two least()/greatest() expressions
+// must match the index definition exactly for Postgres to use it.
+export async function getConversation(
+    username: string,
+    otherUsername: string,
+    limit: number,
+    before: string | null
+): Promise<MessageRow[]> {
+    const rows = await sql`
+        WITH me AS (
+            SELECT id FROM users WHERE username = ${username}
+        ),
+        them AS (
+            SELECT id FROM users WHERE username = ${otherUsername}
+        )
+        SELECT
+            m.id,
+            s.username AS sender_username,
+            r.username AS recipient_username,
+            m.body,
+            m.created_at
+        FROM messages m
+        JOIN users s ON s.id = m.sender_id
+        JOIN users r ON r.id = m.recipient_id, me, them
+        WHERE least(m.sender_id, m.recipient_id)    = least(me.id, them.id)
+          AND greatest(m.sender_id, m.recipient_id) = greatest(me.id, them.id)
+          AND (${before}::bigint IS NULL OR m.id < ${before}::bigint)
+        ORDER BY m.id DESC
+        LIMIT ${limit}
+    `
+    return rows as MessageRow[]
+}
+
+// Store a device's push token for this user. The token is the primary key, so a
+// token that already exists (same phone, new login) is re-pointed at this user.
+export async function upsertPushToken(username: string, token: string): Promise<boolean> {
+    const rows = await sql`
+        INSERT INTO push_tokens (token, user_id)
+        SELECT ${token}, id FROM users WHERE username = ${username}
+        ON CONFLICT (token) DO UPDATE SET user_id = EXCLUDED.user_id
+        RETURNING 1
+    `
+    return rows.length > 0
+}
+
+export async function getPushTokens(username: string): Promise<string[]> {
+    const rows = await sql`
+        SELECT t.token
+        FROM push_tokens t
+        JOIN users u ON u.id = t.user_id
+        WHERE u.username = ${username}
+    `
+    return rows.map((row: { token: string }) => row.token)
+}
+
+// Called when Expo reports a token as dead (app uninstalled).
+export async function deletePushToken(token: string): Promise<void> {
+    await sql`DELETE FROM push_tokens WHERE token = ${token}`
 }

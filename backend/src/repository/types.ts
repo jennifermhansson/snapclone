@@ -145,3 +145,13 @@ export function toSnap(row: SnapRow): Snap {
             media_mime: row.media_mime,
         }
 }
+
+// A chat message with both ends resolved to usernames. ids never leave the
+// backend, so the join happens in SQL and the row carries names only.
+export type MessageRow = {
+    id: string
+    sender_username: string
+    recipient_username: string
+    body: string
+    created_at: Date
+}

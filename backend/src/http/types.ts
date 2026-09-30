@@ -97,3 +97,28 @@ export type FriendParams = {
 export type SnapParams = {
     id: string
 }
+
+// A chat message, as returned by GET /messages/:username and POST /messages,
+// and as the payload of the message_received websocket event.
+export type ApiMessage = {
+    id: string
+    sender_username: string
+    recipient_username: string
+    body: string
+    created_at: string
+}
+
+export type SendMessageRequest = {
+    recipient_username: string
+    body: string
+}
+
+export type MessagesQuery = {
+    // Id of the oldest message the client already has. Omit for the newest page.
+    before?: string
+    limit?: string
+}
+
+export type PushTokenRequest = {
+    token: string
+}

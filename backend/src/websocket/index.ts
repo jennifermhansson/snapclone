@@ -2,6 +2,8 @@ import type { FastifyInstance } from "fastify";
 import { Server } from "socket.io";
 import type { TokenPayload } from "../auth";
 import { Unauthorized } from "../errors";
+import { bindUser, connectMessaging, unbindUser } from "../messaging";
+import { sendPushForUnroutable } from "../push";
 import { setWebsocketServer, userRoom, type SnapSocketServer } from "./server";
 import type {
     ClientToServerEvents,
@@ -16,9 +18,31 @@ async function websocket(httpServer: FastifyInstance) {
         ServerToClientEvents,
         InterServerEvents,
         SocketData
-    >(httpServer.server, {});
+    >(httpServer.server, {
+        // UPPGIFT.md, "Se upp: socket.io bakom round-robin", solution 1. Long-polling
+        // needs several requests to land on the same instance, which round-robin
+        // does not guarantee (400 Session ID unknown). A plain websocket is one
+        // connection, so it stays on the instance that accepted it. Clients must
+        // also set transports: ['websocket'] — a polling client now gets an error
+        // straight away instead of failing at random.
+        transports: ["websocket"],
+    });
 
     setWebsocketServer(websocketServer);
+
+    // Events arrive here from the Exchange — published by any instance, this one
+    // included — and are delivered to the user's sockets on THIS instance.
+    // The event name comes off the wire as a string, so it cannot be checked
+    // against ServerToClientEvents here; the typed side is controllers.ts.
+    await connectMessaging(
+        ({ username, event, payload }) => {
+            const room = websocketServer.to(userRoom(username)) as unknown as {
+                emit(event: string, payload: unknown): void;
+            };
+            room.emit(event, payload);
+        },
+        sendPushForUnroutable,
+    );
 
     console.log("Websocket initialized!");
 
@@ -48,7 +72,7 @@ async function websocket(httpServer: FastifyInstance) {
     });
 
     // När en användare har anslutit.
-    websocketServer.on("connection", (socket) => {
+    websocketServer.on("connection", async (socket) => {
         // The personal room is how services address this person by name without
         // tracking socket ids. Several devices join the same room; socket.io
         // removes each socket from it on disconnect.
@@ -63,7 +87,20 @@ async function websocket(httpServer: FastifyInstance) {
             console.log(
                 `Websocket disconnected: ${socket.data.username} (${reason})`,
             );
+
+            unbindUser(socket.data.username).catch((err) =>
+                console.error("Failed to unbind user", err),
+            );
         });
+
+        // Tell the Exchange this instance wants this user's events. After the
+        // disconnect listener is registered, so a socket that drops while this
+        // awaits still gets unbound instead of leaking a count.
+        try {
+            await bindUser(socket.data.username);
+        } catch (err) {
+            console.error("Failed to bind user", err);
+        }
     });
 
     httpServer.addHook("preClose", (done) => {

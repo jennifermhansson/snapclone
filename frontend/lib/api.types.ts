@@ -35,3 +35,12 @@ export type SendSnapInput = {
   photo: { uri: string; mimetype: string };
   text?: string;
 };
+
+/** A chat message. Also the payload of the `message_received` websocket event. */
+export type ApiMessage = {
+  id: string;
+  sender_username: string;
+  recipient_username: string;
+  body: string;
+  created_at: string;
+};

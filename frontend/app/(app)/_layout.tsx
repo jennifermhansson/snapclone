@@ -1,11 +1,16 @@
 import { Stack } from 'expo-router';
 
 import { Colors } from '@/constants/design';
+import { usePushRegistration } from '@/hooks/use-push-registration';
+import { useRealtime } from '@/hooks/use-realtime';
 
 /** The pager is the anchor; everything else here renders OVER it. */
 export const unstable_settings = { anchor: '(tabs)' };
 
 export default function AppLayout() {
+  useRealtime();
+  usePushRegistration();
+
   return (
     <Stack
       screenOptions={{ headerShown: false, contentStyle: { backgroundColor: Colors.surface } }}
