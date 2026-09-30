@@ -1,0 +1,97 @@
+# docker compose up --build
+#
+# Only nginx publishes a port. Everything else lives on the private `snap-net`
+# network and can only be reached from the other services — not from the host,
+# not from the LAN. Secrets come from .env (see .env.example), never from here.
+
+name: snap
+
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "${PUBLIC_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - backend
+    networks:
+      - snap-net
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    # No container_name and no ports: that is what lets several replicas coexist.
+    deploy:
+      replicas: ${BACKEND_REPLICAS:-2}
+    environment:
+      HOST: 0.0.0.0
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Set JWT_SECRET_KEY in .env}
+      DATABASE_URL: postgres://snap:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/snap
+      RABBITMQ_URL: amqp://snap:${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}@rabbitmq:5672
+      S3_BUCKET: ${S3_BUCKET:-}
+      S3_REGION: ${S3_REGION:-}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - snap-net
+    # An instance that loses RabbitMQ exits on purpose (messaging/index.ts);
+    # this brings it back with fresh bindings.
+    restart: unless-stopped
+
+  # Runs the SQL migrations once, then exits. Backends wait for it.
+  migrate:
+    build: ./backend
+    command: ["bunx", "dbmate", "--migrations-dir", "db/migrations", "--no-dump-schema", "up"]
+    environment:
+      # dbmate wants sslmode spelled out; the backend's Bun.sql does not.
+      DATABASE_URL: postgres://snap:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/snap?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - snap-net
+    restart: "no"
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: snap
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: snap
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U snap -d snap"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - snap-net
+    restart: unless-stopped
+
+  # The Exchange in architecture.png.
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: snap
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?Set RABBITMQ_PASSWORD in .env}
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - snap-net
+    restart: unless-stopped
+
+networks:
+  snap-net:
+
+volumes:
+  postgres-data:
