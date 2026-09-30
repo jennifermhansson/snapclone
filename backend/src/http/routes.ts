@@ -81,6 +81,27 @@ async function routes(httpServer: FastifyInstance) {
         handler: controllers.reportScreenshot
     })
 
+    httpServer.route({
+        method: 'POST',
+        url: '/messages',
+        preHandler: [httpServer.authenticate],
+        handler: controllers.sendMessage
+    })
+
+    httpServer.route({
+        method: 'GET',
+        url: '/messages/:username',
+        preHandler: [httpServer.authenticate],
+        handler: controllers.getMessages
+    })
+
+    httpServer.route({
+        method: 'POST',
+        url: '/push-token',
+        preHandler: [httpServer.authenticate],
+        handler: controllers.savePushToken
+    })
+
 }
 
 export default routes

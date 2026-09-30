@@ -1,6 +1,7 @@
 import { AlreadyExists, BadRequest, NotFound, Unauthorized } from './errors'
-import type { AddFriendResponse, ApiFriend, ApiFriendRequest, ApiSnap, ApiSnapSummary, ApiUser, AuthRequest, SendSnapResponse } from './http/types'
+import type { AddFriendResponse, ApiFriend, ApiFriendRequest, ApiMessage, ApiSnap, ApiSnapSummary, ApiUser, AuthRequest, SendSnapResponse } from './http/types'
 import * as repository from './repository'
+import type { MessageRow } from './repository/types'
 import { hashPassword, verifyPassword } from './utils/password';
 import * as s3 from './utils/s3'
 import * as websocket from './websocket/controllers'
@@ -244,3 +245,84 @@ export async function reportScreenshot(username: string, snapId: string): Promis
     websocket.sendScreenshotNotification(snap.sender_username, snapId, username)
 }
 
+
+const MAX_MESSAGE_LENGTH = 2000
+const DEFAULT_PAGE_SIZE = 50
+const MAX_PAGE_SIZE = 100
+
+function toApiMessage(message: MessageRow): ApiMessage {
+    return {
+        id: message.id,
+        sender_username: message.sender_username,
+        recipient_username: message.recipient_username,
+        body: message.body,
+        created_at: message.created_at.toISOString(),
+    }
+}
+
+// Only friends with mutual: true can chat — areFriends requires both directed
+// edges, which is exactly that. One 403-ish answer is not needed: the snap
+// rules already use BadRequest for "not friends", so chat does the same.
+async function assertFriends(username: string, otherUsername: string): Promise<void> {
+    if (username === otherUsername) throw new BadRequest("You can't chat with yourself")
+
+    const friends = await repository.areFriends(username, otherUsername)
+    if (!friends) throw new BadRequest(`You are not friends with ${otherUsername}`)
+}
+
+// Save first, notify after — like sendSnap. The message is durable before
+// anyone is told, so a lost notification costs nothing: the recipient finds it
+// in the history.
+export async function sendMessage(
+    senderUsername: string,
+    recipientUsername: string,
+    body: string
+): Promise<ApiMessage> {
+    const trimmed = body.trim()
+
+    if (trimmed.length === 0) throw new BadRequest('A message cannot be empty')
+    if (trimmed.length > MAX_MESSAGE_LENGTH) {
+        throw new BadRequest(`A message can be at most ${MAX_MESSAGE_LENGTH} characters`)
+    }
+
+    await assertFriends(senderUsername, recipientUsername)
+
+    const saved = await repository.insertMessage(senderUsername, recipientUsername, trimmed)
+    if (!saved) throw new NotFound('User not found')
+
+    const message = toApiMessage(saved)
+
+    websocket.sendMessageNotification(recipientUsername, message)
+
+    return message
+}
+
+export async function getMessages(
+    username: string,
+    otherUsername: string,
+    limitParam: string | undefined,
+    before: string | undefined
+): Promise<ApiMessage[]> {
+    await assertFriends(username, otherUsername)
+
+    // Postgres throws on a non-numeric bigint cast, which would be a 500.
+    if (before !== undefined && !/^\d+$/.test(before)) throw new BadRequest('before must be a message id')
+
+    const limit = limitParam === undefined ? DEFAULT_PAGE_SIZE : Number(limitParam)
+    if (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_SIZE) {
+        throw new BadRequest(`limit must be between 1 and ${MAX_PAGE_SIZE}`)
+    }
+
+    const rows = await repository.getConversation(username, otherUsername, limit, before ?? null)
+
+    return rows.map(toApiMessage)
+}
+
+export async function savePushToken(username: string, token: string): Promise<void> {
+    // Expo tokens look like ExponentPushToken[xxxx] (or ExpoPushToken[xxxx]).
+    // This is a boundary: whatever arrives here is later sent to Expo's API.
+    if (!/^Expo(nent)?PushToken\[[^\]]+\]$/.test(token)) throw new BadRequest('Invalid push token')
+
+    const saved = await repository.upsertPushToken(username, token)
+    if (!saved) throw new NotFound('User not found')
+}

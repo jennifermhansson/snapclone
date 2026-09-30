@@ -1,3 +1,4 @@
+import type { ApiMessage } from '../http/types'
 import type { SnapType } from '../repository/types'
 
 // The socket is push-only: the server tells connected clients that something
@@ -43,6 +44,7 @@ export type ServerToClientEvents = {
     friend_request: (payload: FriendRequestPayload) => void
     friend_accepted: (payload: FriendAcceptedPayload) => void
     screenshot_taken: (payload: ScreenshotTakenPayload) => void
+    message_received: (payload: ApiMessage) => void
 }
 
 // Nothing is accepted from clients. Reserved events like `disconnect` are typed

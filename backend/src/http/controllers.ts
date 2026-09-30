@@ -1,5 +1,5 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { AddFriendRequest, AuthRequest, FriendParams, RefreshRequest, SendSnapBody, SnapParams, Tokens } from './types'
+import type { AddFriendRequest, AuthRequest, FriendParams, MessagesQuery, PushTokenRequest, RefreshRequest, SendMessageRequest, SendSnapBody, SnapParams, Tokens } from './types'
 import * as services from '../services'
 import type { TokenPayload } from "../auth";
 import { BadRequest, NotFound, Unauthorized } from "../errors";
@@ -186,6 +186,42 @@ export async function getInbox(req: FastifyRequest, res: FastifyReply) {
 
 export async function reportScreenshot(req: FastifyRequest<{ Params: SnapParams }>, res: FastifyReply) {
     await services.reportScreenshot(req.user.username, req.params.id)
+
+    res.status(204).send()
+}
+
+export async function sendMessage(req: FastifyRequest<{ Body: SendMessageRequest }>, res: FastifyReply) {
+    const { recipient_username, body } = req.body ?? {}
+
+    if (typeof recipient_username !== 'string' || typeof body !== 'string') {
+        throw new BadRequest('recipient_username and body are required')
+    }
+
+    const message = await services.sendMessage(req.user.username, recipient_username, body)
+
+    res.status(201).send(message)
+}
+
+export async function getMessages(
+    req: FastifyRequest<{ Params: FriendParams; Querystring: MessagesQuery }>,
+    res: FastifyReply
+) {
+    const messages = await services.getMessages(
+        req.user.username,
+        req.params.username,
+        req.query.limit,
+        req.query.before
+    )
+
+    res.status(200).send({ messages })
+}
+
+export async function savePushToken(req: FastifyRequest<{ Body: PushTokenRequest }>, res: FastifyReply) {
+    const token = req.body?.token
+
+    if (typeof token !== 'string') throw new BadRequest('token is required')
+
+    await services.savePushToken(req.user.username, token)
 
     res.status(204).send()
 }

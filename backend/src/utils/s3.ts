@@ -5,20 +5,26 @@ import { S3Client } from 'bun'
 // Bun's own default is 24 hours, which is far too long for this.
 const DEFAULT_EXPIRY_SECONDS = 300
 
-// Bun loads .env into process.env at startup. Fail here rather than on the
-// first upload: missing credentials are a config mistake, not a runtime state.
+// Bun loads .env into process.env at startup. S3 is optional so the app (chat,
+// friends, websocket) boots without it — the client is created on first use and
+// only then do missing credentials fail, which means only photo snaps break.
 function required(name: string): string {
     const value = process.env[name]
     if (!value) throw new Error(`Set ${name}!`)
     return value
 }
 
-const client = new S3Client({
-    accessKeyId: required('S3_ACCESS_KEY_ID'),
-    secretAccessKey: required('S3_SECRET_ACCESS_KEY'),
-    region: required('S3_REGION'),
-    bucket: required('S3_BUCKET'),
-})
+let client: S3Client | null = null
+
+function getClient(): S3Client {
+    client ??= new S3Client({
+        accessKeyId: required('S3_ACCESS_KEY_ID'),
+        secretAccessKey: required('S3_SECRET_ACCESS_KEY'),
+        region: required('S3_REGION'),
+        bucket: required('S3_BUCKET'),
+    })
+    return client
+}
 
 // Uint8Array covers Buffer too, which is what a multipart form part gives you.
 export type UploadBody = string | ArrayBuffer | Uint8Array | Blob
@@ -30,7 +36,7 @@ export async function uploadFile(
     body: UploadBody,
     contentType: string
 ): Promise<void> {
-    await client.file(key).write(body, { type: contentType })
+    await getClient().file(key).write(body, { type: contentType })
 }
 
 // Presigned GET for an existing object.
@@ -44,5 +50,5 @@ export function getPresignedUrl(
     key: string,
     expiresIn: number = DEFAULT_EXPIRY_SECONDS
 ): string {
-    return client.presign(key, { expiresIn, method: 'GET' })
+    return getClient().presign(key, { expiresIn, method: 'GET' })
 }
